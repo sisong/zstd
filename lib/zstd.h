@@ -1647,6 +1647,10 @@ ZSTDLIB_STATIC_API ZSTD_DDict* ZSTD_createDDict_advanced(
  *  note: equivalent to ZSTD_createCDict_advanced(), with dictLoadMethod==ZSTD_dlm_byRef */
 ZSTDLIB_STATIC_API ZSTD_CDict* ZSTD_createCDict_byReference(const void* dictBuffer, size_t dictSize, int compressionLevel);
 
+ZSTDLIB_STATIC_API ZSTD_CDict* ZSTD_createCDict_delta(const void* dictBuffer,size_t dictSize,size_t allDeltaSize,
+                                                      int compressionLevel,unsigned long long pledgedSrcSize);
+ZSTDLIB_STATIC_API size_t ZSTD_updateCDict_delta(ZSTD_CDict* cdict,const void* dictDelta, size_t dictDeltaSize);
+
 /*! ZSTD_getCParams() :
  * @return ZSTD_compressionParameters structure for a selected compression level and estimated srcSize.
  * `estimatedSrcSize` value is optional, select 0 if not known */

@@ -68,6 +68,15 @@ size_t ZSTD_compressBound(size_t srcSize) {
     return ZSTD_COMPRESSBOUND(srcSize);
 }
 
+struct ZSTD_DictDeltaUpdate {
+    const BYTE* dictBegin;
+    const BYTE* dictCur;
+    const BYTE* dictEnd;
+    ZSTD_dictTableLoadMethod_e  dtlm;
+    ZSTD_strategy               strategy;
+    ZSTD_paramSwitch_e          useRowMatchFinder;
+    U32                         hashLog;
+};
 
 /*-*************************************
 *  Context memory management
@@ -87,6 +96,7 @@ struct ZSTD_CDict_s {
                                            * row-based matchfinder. Unless the cdict is reloaded, we will use
                                            * the same greedy/lazy matchfinder at compression time.
                                            */
+    struct ZSTD_DictDeltaUpdate deltaup;
 };  /* typedef'd to ZSTD_CDict within "zstd.h" */
 
 ZSTD_CCtx* ZSTD_createCCtx(void)
@@ -4205,8 +4215,24 @@ static size_t ZSTD_loadDictionaryContent(ZSTD_matchState_t* ms,
                                          ZSTD_dictTableLoadMethod_e dtlm)
 {
     const BYTE* ip = (const BYTE*) src;
-    const BYTE* const iend = ip + srcSize;
+    const BYTE* iend = ip + srcSize;
+    const BYTE* iend_c = iend;
     int const loadLdmDict = params->ldmParams.enableLdm == ZSTD_ps_enable && ls != NULL;
+
+    if (params->deltaup){
+        assert(!loadLdmDict);
+        assert((params->deltaup->dictEnd-params->deltaup->dictBegin)<=ZSTD_CURRENT_MAX-1);
+        assert(params->deltaup->dictBegin==src);
+        assert(params->deltaup->dictEnd==src+srcSize);
+        params->deltaup->dtlm=dtlm;
+        params->deltaup->strategy=params->cParams.strategy;
+        params->deltaup->useRowMatchFinder=params->useRowMatchFinder;
+        params->deltaup->hashLog=params->cParams.hashLog;
+        
+        iend_c= params->deltaup->dictEnd;
+        iend=params->deltaup->dictCur;
+        srcSize=iend-ip;
+    }
 
     /* Assert that we the ms params match the params we're being given */
     ZSTD_assertEqualCParams(params->cParams, ms->cParams);
@@ -4241,7 +4267,7 @@ static size_t ZSTD_loadDictionaryContent(ZSTD_matchState_t* ms,
 
     if (srcSize <= HASH_READ_SIZE) return 0;
 
-    ZSTD_overflowCorrectIfNeeded(ms, ws, params, ip, iend);
+    ZSTD_overflowCorrectIfNeeded(ms, ws, params, ip, iend_c);
 
     if (loadLdmDict)
         ZSTD_ldm_fillHashTable(ls, ip, iend, &params->ldmParams);
@@ -4292,6 +4318,69 @@ static size_t ZSTD_loadDictionaryContent(ZSTD_matchState_t* ms,
     return 0;
 }
 
+
+/*! ZSTD_updateDictionaryContent_delta() :
+ *  @return : 0, or an error code
+ */
+static size_t ZSTD_updateDictionaryContent_delta(ZSTD_matchState_t* ms,
+                                                 struct ZSTD_DictDeltaUpdate* deltaup,
+                                                 const void* dictDelta,size_t dictDeltaSize)
+{
+    ZSTD_dictTableLoadMethod_e dtlm=deltaup->dtlm;
+    const BYTE* iend=(const BYTE*)dictDelta+dictDeltaSize;
+    if (dictDeltaSize<=0) return 0;
+    assert(dictDelta==deltaup->dictCur);
+    assert(iend<=deltaup->dictEnd);
+
+    ZSTD_window_update(&ms->window,dictDelta,dictDeltaSize, /* forceNonContiguous */ 0);
+    ms->loadedDictEnd=(U32)(iend-ms->window.base);
+
+    switch(deltaup->strategy)
+    {
+    case ZSTD_fast:
+        ZSTD_fillHashTable(ms, iend, dtlm);
+        break;
+    case ZSTD_dfast:
+        ZSTD_fillDoubleHashTable(ms, iend, dtlm);
+        break;
+
+    case ZSTD_greedy:
+    case ZSTD_lazy:
+    case ZSTD_lazy2:
+        assert(srcSize >= HASH_READ_SIZE);
+        if (ms->dedicatedDictSearch) {
+            assert(ms->chainTable != NULL);
+            ZSTD_dedicatedDictSearch_lazy_loadDictionary(ms, iend-HASH_READ_SIZE);
+        } else {
+            assert(deltaup->useRowMatchFinder != ZSTD_ps_auto);
+            if (deltaup->useRowMatchFinder == ZSTD_ps_enable) {
+                size_t const tagTableSize = ((size_t)1 << deltaup->hashLog) * sizeof(U16);
+                ZSTD_memset(ms->tagTable, 0, tagTableSize);
+                ZSTD_row_update(ms, iend-HASH_READ_SIZE);
+                DEBUGLOG(4, "Using row-based hash table for lazy dict");
+            } else {
+                ZSTD_insertAndFindFirstIndex(ms, iend-HASH_READ_SIZE);
+                DEBUGLOG(4, "Using chain-based hash table for lazy dict");
+            }
+        }
+        break;
+
+    case ZSTD_btlazy2:   /* we want the dictionary table fully sorted */
+    case ZSTD_btopt:
+    case ZSTD_btultra:
+    case ZSTD_btultra2:
+        assert(srcSize >= HASH_READ_SIZE);
+        ZSTD_updateTree(ms, iend-HASH_READ_SIZE, iend);
+        //ZSTD_updateTree_internal(ms,iend-HASH_READ_SIZE,iend,ms->cParams.minMatch,ZSTD_extDict);
+        break;
+
+    default:
+        assert(0);  /* not possible : not a valid strategy id */
+    }
+
+    ms->nextToUpdate = (U32)(iend - ms->window.base);
+    return 0;
+}
 
 /* Dictionaries that assign zero probability to symbols that show up causes problems
  * when FSE encoding. Mark dictionaries with zero probability symbols as FSE_repeat_check
@@ -4961,6 +5050,33 @@ ZSTD_CDict* ZSTD_createCDict_byReference(const void* dict, size_t dictSize, int 
     if (cdict)
         cdict->compressionLevel = (compressionLevel == 0) ? ZSTD_CLEVEL_DEFAULT : compressionLevel;
     return cdict;
+}
+
+ZSTD_CDict* ZSTD_createCDict_delta(const void* dictBuffer,size_t dictSize,size_t allDeltaSize,
+                                   int compressionLevel,unsigned long long pledgedSrcSize)
+{
+    ZSTD_CDict* cdict=0;
+    const BYTE* dict=(const BYTE*)dictBuffer;
+    struct ZSTD_DictDeltaUpdate deltaup={dict,dict+(dictSize-allDeltaSize),dict+dictSize};
+    ZSTD_compressionParameters cParams=ZSTD_getCParams_internal(compressionLevel,pledgedSrcSize,dictSize,ZSTD_cpm_createCDict);
+    ZSTD_CCtx_params cctxParams;
+    ZSTD_memset(&cctxParams,0,sizeof(cctxParams));
+    ZSTD_CCtxParams_init(&cctxParams,0);
+    cctxParams.cParams=cParams;
+    cctxParams.customMem=ZSTD_defaultCMem;
+    cctxParams.deltaup=&deltaup;
+    cdict=ZSTD_createCDict_advanced2(dict,dictSize,ZSTD_dlm_byRef,ZSTD_dct_rawContent,
+                                     &cctxParams,ZSTD_defaultCMem);
+    if (cdict){
+        cdict->compressionLevel=(compressionLevel==0)?ZSTD_CLEVEL_DEFAULT:compressionLevel;
+        cdict->deltaup=deltaup;
+    }
+    return cdict;
+}
+
+size_t ZSTD_updateCDict_delta(ZSTD_CDict* cdict,const void* dictDelta, size_t dictDeltaSize){
+    return ZSTD_updateDictionaryContent_delta(&cdict->matchState,&cdict->deltaup,
+                                              dictDelta,dictDeltaSize);
 }
 
 size_t ZSTD_freeCDict(ZSTD_CDict* cdict)

@@ -281,6 +281,8 @@ typedef struct {
     size_t maxSequences;
 } SeqCollector;
 
+struct ZSTD_DictDeltaUpdate;
+
 struct ZSTD_CCtx_params_s {
     ZSTD_format_e format;
     ZSTD_compressionParameters cParams;
@@ -327,6 +329,8 @@ struct ZSTD_CCtx_params_s {
 
     /* Always load a dictionary in ext-dict mode (not prefix mode)? */
     int deterministicRefPrefix;
+
+    struct ZSTD_DictDeltaUpdate* deltaup;
 
     /* Internal use, for createCCtxParams() and freeCCtxParams() only */
     ZSTD_customMem customMem;
