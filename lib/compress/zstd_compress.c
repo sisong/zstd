@@ -4224,6 +4224,7 @@ static size_t ZSTD_loadDictionaryContent(ZSTD_matchState_t* ms,
         assert((params->deltaup->dictEnd-params->deltaup->dictBegin)<=ZSTD_CURRENT_MAX-1);
         assert(params->deltaup->dictBegin==src);
         assert(params->deltaup->dictEnd==src+srcSize);
+        assert(params->cParams.strategy>=ZSTD_btlazy2);
         params->deltaup->dtlm=dtlm;
         params->deltaup->strategy=params->cParams.strategy;
         params->deltaup->useRowMatchFinder=params->useRowMatchFinder;
@@ -4323,18 +4324,28 @@ static size_t ZSTD_loadDictionaryContent(ZSTD_matchState_t* ms,
  *  @return : 0, or an error code
  */
 static size_t ZSTD_updateDictionaryContent_delta(ZSTD_matchState_t* ms,
-                                                 struct ZSTD_DictDeltaUpdate* deltaup,
-                                                 const void* dictDelta,size_t dictDeltaSize)
+                                                 struct ZSTD_DictDeltaUpdate* deltaup,size_t dictDeltaSize)
 {
     ZSTD_dictTableLoadMethod_e dtlm=deltaup->dtlm;
+    const void* dictDelta=deltaup->dictCur;
     const BYTE* iend=(const BYTE*)dictDelta+dictDeltaSize;
     if (dictDeltaSize<=0) return 0;
-    assert(dictDelta==deltaup->dictCur);
-    assert(iend<=deltaup->dictEnd);
+    deltaup->dictCur=iend;
 
     ZSTD_window_update(&ms->window,dictDelta,dictDeltaSize, /* forceNonContiguous */ 0);
+   
+    //NOTE:
+    //  not support update data overflow dictSize
+    assert(deltaup->dictCur<=deltaup->dictEnd); 
+    if (deltaup->dictCur>deltaup->dictEnd){
+    //  try fix windows size to dictSize, maybe work
+    //  ZSTD_overflowCorrectIfNeeded ?
+        ms->window.lowLimit=deltaup->dictCur-deltaup->dictEnd;
+    }
+
     ms->loadedDictEnd=(U32)(iend-ms->window.base);
 
+    assert(deltaup->strategy>=ZSTD_btlazy2);
     switch(deltaup->strategy)
     {
     case ZSTD_fast:
@@ -5062,6 +5073,8 @@ ZSTD_CDict* ZSTD_createCDict_delta(const void* dictBuffer,size_t dictSize,size_t
     ZSTD_CCtx_params cctxParams;
     ZSTD_memset(&cctxParams,0,sizeof(cctxParams));
     ZSTD_CCtxParams_init(&cctxParams,0);
+    if (cParams.strategy<ZSTD_btlazy2) //other strategy support is not good
+        cParams.strategy=ZSTD_btlazy2;
     cctxParams.cParams=cParams;
     cctxParams.customMem=ZSTD_defaultCMem;
     cctxParams.deltaup=&deltaup;
@@ -5074,9 +5087,8 @@ ZSTD_CDict* ZSTD_createCDict_delta(const void* dictBuffer,size_t dictSize,size_t
     return cdict;
 }
 
-size_t ZSTD_updateCDict_delta(ZSTD_CDict* cdict,const void* dictDelta, size_t dictDeltaSize){
-    return ZSTD_updateDictionaryContent_delta(&cdict->matchState,&cdict->deltaup,
-                                              dictDelta,dictDeltaSize);
+size_t ZSTD_updateCDict_delta(ZSTD_CDict* cdict,size_t dictDeltaSize){
+    return ZSTD_updateDictionaryContent_delta(&cdict->matchState,&cdict->deltaup,dictDeltaSize);
 }
 
 size_t ZSTD_freeCDict(ZSTD_CDict* cdict)
