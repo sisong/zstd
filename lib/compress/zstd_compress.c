@@ -4856,41 +4856,12 @@ static size_t ZSTD_updateDictionaryContent_delta(ZSTD_matchState_t* ms,
     assert(deltaup->strategy>=ZSTD_btlazy2);
     switch(deltaup->strategy)
     {
-    case ZSTD_fast:
-        ZSTD_fillHashTable(ms, iend, dtlm);
-        break;
-    case ZSTD_dfast:
-        ZSTD_fillDoubleHashTable(ms, iend, dtlm);
-        break;
-
-    case ZSTD_greedy:
-    case ZSTD_lazy:
-    case ZSTD_lazy2:
-        assert(srcSize >= HASH_READ_SIZE);
-        if (ms->dedicatedDictSearch) {
-            assert(ms->chainTable != NULL);
-            ZSTD_dedicatedDictSearch_lazy_loadDictionary(ms, iend-HASH_READ_SIZE);
-        } else {
-            assert(deltaup->useRowMatchFinder != ZSTD_ps_auto);
-            if (deltaup->useRowMatchFinder == ZSTD_ps_enable) {
-                size_t const tagTableSize = ((size_t)1 << deltaup->hashLog) * sizeof(U16);
-                ZSTD_memset(ms->tagTable, 0, tagTableSize);
-                ZSTD_row_update(ms, iend-HASH_READ_SIZE);
-                DEBUGLOG(4, "Using row-based hash table for lazy dict");
-            } else {
-                ZSTD_insertAndFindFirstIndex(ms, iend-HASH_READ_SIZE);
-                DEBUGLOG(4, "Using chain-based hash table for lazy dict");
-            }
-        }
-        break;
-
     case ZSTD_btlazy2:   /* we want the dictionary table fully sorted */
     case ZSTD_btopt:
     case ZSTD_btultra:
     case ZSTD_btultra2:
         assert(srcSize >= HASH_READ_SIZE);
-        ZSTD_updateTree(ms, iend-HASH_READ_SIZE, iend);
-        //ZSTD_updateTree_internal(ms,iend-HASH_READ_SIZE,iend,ms->cParams.minMatch,ZSTD_extDict);
+        ZSTD_updateTree(ms, iend - HASH_READ_SIZE, iend);
         break;
 
     default:
