@@ -5070,7 +5070,7 @@ ZSTD_loadDictionaryContent(ZSTD_MatchState_t* ms,
 /*! ZSTD_updateDictionaryContent_delta() :
  *  @return : 0, or an error code
  */
-static size_t ZSTD_updateDictionaryContent_delta(ZSTD_matchState_t* ms,
+static size_t ZSTD_updateDictionaryContent_delta(ZSTD_MatchState_t* ms,
                                                  struct ZSTD_DictDeltaUpdate* deltaup,size_t dictDeltaSize)
 {
     ZSTD_dictTableLoadMethod_e dtlm=deltaup->dtlm;
